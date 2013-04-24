@@ -48,12 +48,14 @@ class User(db.Model):
     google_id = db.Column(db.String(120))
     access_token = db.Column(db.String(500))
     expires_at = db.Column(db.Integer)
+    refresh_token = db.Column(db.String(500))
 
-    def __init__(self, username, google_id, access_token, expires_at):
+    def __init__(self, username, google_id, access_token, expires_at, refresh_token):
         self.username = username
         self.google_id = google_id
         self.access_token = access_token
         self.expires_at = expires_at
+        self.refresh_token = refresh_token
 
     def __repr__(self):
         return '<User %r>' % self.username
@@ -64,10 +66,10 @@ class User(db.Model):
         return user
 
     @staticmethod
-    def get_or_create(username, google_id, access_token, expires_at):
+    def get_or_create(username, google_id, access_token, expires_at, refresh_token):
         user = User.query.filter_by(username=username).first()
         if user is None:
-            user = User(username, google_id, access_token, expires_at)
+            user = User(username, google_id, access_token, expires_at, refresh_token)
             db.session.add(user)
             db.session.commit()
         return user
@@ -87,15 +89,36 @@ def login():
         'response_type': 'code',
         'redirect_uri': redirect_uri,
         'access_type' : 'offline',
+        #'approval_prompt' : 'force',
     }
     return redirect(google.get_authorize_url(**params))
+
+@app.route('/google/refresh')
+def refresh():
+    user = User.get(GOOGLE_TEST_EMAIL)
+    response = google.get_raw_access_token(data={
+        'refresh_token': user.refresh_token,
+        'grant_type': 'refresh_token',
+    })
+    response = response.json()
+    access_token = response['access_token']
+    print response
+    # setup the session using the access_token
+    session = google.get_session(access_token)
+    user = session.get('https://www.googleapis.com/oauth2/v1/userinfo').json()
+    flash('Refreshed logging session as ' + user['email'])
+    return redirect(url_for('index'))
 
 @app.route('/google/reuse')
 def reuse():
     user = User.get(GOOGLE_TEST_EMAIL)
     current = int(time.time())
-    if not user or user.expires_at < current :
-        redirect(url_for('login'))
+    remaining = user.expires_at - current
+    print "remaining=%d" % (remaining)
+    if not user :
+        return redirect(url_for('login'))
+    elif remaining <= 0:
+        return redirect(url_for('refresh'))
     # setup the session using the access_token
     session = google.get_session(user.access_token)
     # the user object as returned by google
@@ -110,6 +133,8 @@ def authorized():
         flash('You did not authorize the request')
         return redirect(url_for('index'))
 
+    print request.args
+
     # make a request for the access token credentials using code
     redirect_uri = url_for('authorized', _external=True)
     data = {
@@ -119,9 +144,14 @@ def authorized():
     }
     response = google.get_raw_access_token(data=data)
     response = response.json()
+    print response
     access_token = response['access_token']
     expires_in = response['expires_in']
     expires_at = int(time.time()) + response['expires_in']
+    try:
+        refresh_token = response['refresh_token']
+    except:
+        refresh_token = None
 
     # setup the session using the access_token
     session = google.get_session(access_token)
@@ -131,7 +161,7 @@ def authorized():
 
     # create the user, save the access_token, and the expire_at, so that
     # we can later verify if the access token is still valid
-    User.get_or_create(user['email'], user['id'], response['access_token'], expires_at)
+    #User.get_or_create(user['email'], user['id'], response['access_token'], expires_at, refresh_token)
 
     flash('Logged in as ' + user['email'])
     return redirect(url_for('index'))
